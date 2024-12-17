@@ -1,0 +1,17 @@
+DROP TABLE dummy_entity;
+DROP TABLE ROOT;
+DROP TABLE INTERMEDIATE;
+DROP TABLE LEAF;
+DROP TABLE WITH_DELIMITED_COLUMN;
+
+CREATE TABLE dummy_entity
+(
+    id BIGSERIAL PRIMARY KEY
+);
+
+CREATE TABLE related_entity
+(
+    id           BIGSERIAL PRIMARY KEY,
+    content      VARCHAR(255),
+    dummy_entity BIGINT NOT NULL
+);
