@@ -47,7 +47,6 @@ import org.springframework.data.relational.repository.query.RelationalParameterA
 import org.springframework.data.relational.repository.query.RelationalQueryCreator;
 import org.springframework.data.repository.query.Parameters;
 import org.springframework.data.repository.query.ReturnedType;
-import org.springframework.data.repository.query.parser.Part;
 import org.springframework.data.repository.query.parser.PartTree;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.lang.Nullable;
@@ -151,75 +150,86 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 		return new ParametrizedQuery(sql, parameterSource);
 	}
 
-    SelectBuilder.SelectOrdered applyCriteria(
-            @Nullable Criteria criteria,
-            RelationalPersistentEntity<?> rootEntity,
-            Table rootTable,
-            MapSqlParameterSource parameterSource,
-            SelectBuilder.SelectJoin joinBuilder) {
+	SelectBuilder.SelectOrdered applyCriteria(@Nullable Criteria criteria,
+											  RelationalPersistentEntity<?> rootEntity,
+											  Table rootTable,
+											  MapSqlParameterSource parameterSource,
+											  SelectBuilder.SelectJoin joinBuilder) {
+		if (criteria == null) {
+			return ((SelectBuilder.SelectWhere) joinBuilder);
+		}
 
-        if (criteria == null) {
-            return (SelectBuilder.SelectWhere) joinBuilder;
-        }
+		// Extract property path (e.g. ["intermediateEntities", "relatedEntities", "content"])
+		String[] propertySegments = extractPropertyPath(criteria);
 
-        // Extract the full property path (e.g., "relatedEntities.content")
-        String propertyPath = criteria.getColumn().getReference();
+		// Join only on entities (i.e., all segments except the last one)
+		String[] pathToLastEntity = excludeLastSegment(propertySegments);
 
-        // Extract the top-level nested property name (e.g., "relatedEntities")
-        String nestedPropertyName = extractNestedEntityName(propertyPath);
+		// The final property name (e.g., "content")
+		String lastProperty = propertySegments[propertySegments.length - 1];
 
-        // Get the metadata for the nested property
-        RelationalPersistentProperty nestedProperty = rootEntity.getPersistentProperty(nestedPropertyName);
-        if (nestedProperty == null) {
-            throw new IllegalArgumentException("No property '" + nestedPropertyName + "' found in " + rootEntity.getName());
-        }
+		JoinContext joinContext = applyJoins(pathToLastEntity, rootEntity, rootTable, joinBuilder);
 
-        // Get the metadata for the nested entity
-        Class<?> nestedEntityType = nestedProperty.getActualType();
-        RelationalPersistentEntity<?> nestedEntity = context.getRequiredPersistentEntity(nestedEntityType);
+		// Build new Criteria using only the actual field name (no path)
+		Criteria adjustedCriteria = Criteria.where(lastProperty).is(criteria.getValue());
 
-        // Determine the foreign key column name from the @MappedCollection annotation
-        String fkColumn = Optional.ofNullable(nestedProperty.findAnnotation(MappedCollection.class))
-                .map(MappedCollection::idColumn)
-                .orElseThrow(() -> new IllegalStateException(
-                        "Property '" + nestedPropertyName + "' is not annotated with @MappedCollection"));
+		return ((SelectBuilder.SelectWhere) joinContext.joinBuilder).where(
+				queryMapper.getMappedObject(parameterSource, adjustedCriteria, joinContext.table, joinContext.entity)
+		);
+	}
 
-        Table relatedTable = Table.create(nestedEntity.getTableName());
+	private String[] extractPropertyPath(Criteria criteria) {
+		return criteria.getColumn().getReference().split("\\.");
+	}
 
-        // Build the JOIN clause
-        SelectBuilder.SelectWhere joined = joinBuilder
-                .join(relatedTable)
-                .on(relatedTable.column(fkColumn))
-                .equals(rootTable.column(rootEntity.getIdColumn()));
+	private String[] excludeLastSegment(String[] segments) {
+		if (segments.length == 0) return new String[0];
+		return java.util.Arrays.copyOf(segments, segments.length - 1);
+	}
 
-        // Strip the nested prefix from the criteria column (e.g., "relatedEntities.content" -> "content")
-        Criteria strippedCriteria = stripPathPrefix(criteria, nestedPropertyName);
+	private JoinContext applyJoins(String[] path,
+								   RelationalPersistentEntity<?> rootEntity,
+								   Table rootTable,
+								   SelectBuilder.SelectJoin joinBuilder) {
 
-        // Build the WHERE clause based on the stripped criteria
-        return joined.where(queryMapper.getMappedObject(parameterSource, strippedCriteria, relatedTable, nestedEntity));
-    }
+		RelationalPersistentEntity<?> currentEntity = rootEntity;
+		Table currentTable = rootTable;
+		SelectBuilder.SelectJoin currentJoinBuilder = joinBuilder;
 
-    private String extractNestedEntityName(String propertyPath) {
-        int dotIndex = propertyPath.indexOf('.');
-        if (dotIndex == -1) {
-            throw new IllegalArgumentException("Expected nested property path but got: " + propertyPath);
-        }
-        return propertyPath.substring(0, dotIndex);
-    }
+		for (String nestedPropertyName : path) {
+			RelationalPersistentProperty nestedProperty = currentEntity.getPersistentProperty(nestedPropertyName);
+			if (nestedProperty == null) {
+				throw new IllegalArgumentException("No property '" + nestedPropertyName + "' found in " + currentEntity.getName());
+			}
 
-    private Criteria stripPathPrefix(Criteria criteria, String prefix) {
-        String columnPath = criteria.getColumn().getReference();
-        String expectedPrefix = prefix + ".";
+			Class<?> nestedType = nestedProperty.getActualType();
+			RelationalPersistentEntity<?> nestedEntity = context.getRequiredPersistentEntity(nestedType);
+			Table relatedTable = Table.create(nestedEntity.getTableName());
 
-        if (!columnPath.startsWith(expectedPrefix)) {
-            return criteria;
-        }
+			String fkColumn = Optional.ofNullable(nestedProperty.findAnnotation(MappedCollection.class))
+					.map(MappedCollection::idColumn)
+					.orElseThrow(() -> new IllegalStateException(
+							"Property '" + nestedPropertyName + "' is not annotated with @MappedCollection"
+					));
 
-        String strippedPath = columnPath.substring(expectedPrefix.length());
+			currentJoinBuilder = currentJoinBuilder
+					.join(relatedTable)
+					.on(relatedTable.column(fkColumn))
+					.equals(currentTable.column(currentEntity.getIdColumn()));
 
-        // Only handling 'is' for now — extend this if needed
-        return Criteria.where(strippedPath).is(criteria.getValue());
-    }
+			currentEntity = nestedEntity;
+			currentTable = relatedTable;
+		}
+
+		return new JoinContext(currentJoinBuilder, currentEntity, currentTable);
+	}
+
+	private record JoinContext(
+			SelectBuilder.SelectJoin joinBuilder,
+			RelationalPersistentEntity<?> entity,
+							   Table table
+	) {
+	}
 
 	SelectBuilder.SelectOrdered applyOrderBy(Sort sort, RelationalPersistentEntity<?> entity, Table table,
 			SelectBuilder.SelectOrdered selectOrdered) {
