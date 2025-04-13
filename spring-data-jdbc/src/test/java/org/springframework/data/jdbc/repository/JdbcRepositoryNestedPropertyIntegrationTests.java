@@ -76,7 +76,7 @@ public class JdbcRepositoryNestedPropertyIntegrationTests {
         DummyEntity saved = repository.save(dummy);
 
         // when
-        List<DummyEntity> actual = repository.findByIntermediateEntitiesRelatedEntitiesContent(relatedContent);
+        List<DummyEntity> actual = repository.findByIntermediateEntitiesRelatedEntitiesContentIn(List.of(relatedContent));
 
         // then
         assertThat(actual).hasSize(1);
@@ -92,7 +92,7 @@ public class JdbcRepositoryNestedPropertyIntegrationTests {
     interface DummyEntityRepository extends CrudRepository<DummyEntity, Long> {
         List<DummyEntity> findByIntermediateEntitiesContent(String content);
 
-        List<DummyEntity> findByIntermediateEntitiesRelatedEntitiesContent(String content);
+        List<DummyEntity> findByIntermediateEntitiesRelatedEntitiesContentIn(Collection<String> content);
     }
 
     @Configuration

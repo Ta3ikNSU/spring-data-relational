@@ -15,6 +15,7 @@
  */
 package org.springframework.data.jdbc.repository.query;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -32,6 +33,7 @@ import org.springframework.data.relational.core.mapping.RelationalMappingContext
 import org.springframework.data.relational.core.mapping.RelationalPersistentEntity;
 import org.springframework.data.relational.core.mapping.RelationalPersistentProperty;
 import org.springframework.data.relational.core.query.Criteria;
+import org.springframework.data.relational.core.query.CriteriaDefinition;
 import org.springframework.data.relational.core.sql.Column;
 import org.springframework.data.relational.core.sql.Expression;
 import org.springframework.data.relational.core.sql.Expressions;
@@ -165,13 +167,10 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 		// Join only on entities (i.e., all segments except the last one)
 		String[] pathToLastEntity = excludeLastSegment(propertySegments);
 
-		// The final property name (e.g., "content")
-		String lastProperty = propertySegments[propertySegments.length - 1];
-
 		JoinContext joinContext = applyJoins(pathToLastEntity, rootEntity, rootTable, joinBuilder);
 
 		// Build new Criteria using only the actual field name (no path)
-		Criteria adjustedCriteria = Criteria.where(lastProperty).is(criteria.getValue());
+		Criteria adjustedCriteria = rebuildCriteriaWithNewColumn(criteria);
 
 		return ((SelectBuilder.SelectWhere) joinContext.joinBuilder).where(
 				queryMapper.getMappedObject(parameterSource, adjustedCriteria, joinContext.table, joinContext.entity)
@@ -229,6 +228,35 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 			RelationalPersistentEntity<?> entity,
 							   Table table
 	) {
+	}
+
+	private Criteria rebuildCriteriaWithNewColumn(Criteria criteria) {
+		if (criteria.getColumn() != null) {
+			String[] segments = criteria.getColumn().getReference().split("\\.");
+			String lastSegment = segments[segments.length - 1];
+			return Criteria.where(lastSegment).is(criteria.getValue());
+		}
+
+		List<Criteria> children = getChildren(criteria);
+
+		// Базовая поддержка AND / OR
+		if (!children.isEmpty()) {
+			Criteria left = rebuildCriteriaWithNewColumn(children.get(0));
+			Criteria right = rebuildCriteriaWithNewColumn(children.get(1));
+			return criteria.getCombinator() == CriteriaDefinition.Combinator.AND ? left.and(right) : left.or(right);
+		}
+
+		throw new IllegalArgumentException("Unsupported criteria structure: " + criteria);
+	}
+
+	private List<Criteria> getChildren(Criteria criteria) {
+		try {
+			Field field = Criteria.class.getDeclaredField("criteria");
+			field.setAccessible(true);
+			return (List<Criteria>) field.get(criteria);
+		} catch (Exception e) {
+			return List.of();
+		}
 	}
 
 	SelectBuilder.SelectOrdered applyOrderBy(Sort sort, RelationalPersistentEntity<?> entity, Table table,
