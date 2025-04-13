@@ -29,38 +29,69 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class JdbcRepositoryNestedPropertyIntegrationTests {
     @Autowired
     DummyEntityRepository repository;
-    @Autowired
-    RelatedEntityRepository relatedEntityRepository;
 
     @Test
     void getEntityByNestedProperty() {
         // given
         String contentString = "content";
-        RelatedEntity related = new RelatedEntity(contentString);
+        IntermediateEntity related = new IntermediateEntity(contentString);
 
         DummyEntity dummy = new DummyEntity();
-        dummy.relatedEntities = new HashSet<>();
-        dummy.relatedEntities.add(related);
+        dummy.intermediateEntities = new HashSet<>();
+        dummy.intermediateEntities.add(related);
 
         DummyEntity saved = repository.save(dummy);
 
         // when
-        relatedEntityRepository.findAll();
-        List<DummyEntity> actual = repository.findByRelatedEntitiesContent(contentString);
+        List<DummyEntity> actual = repository.findByIntermediateEntitiesContent(contentString);
 
         // then
         assertThat(actual).hasSize(1);
         assertThat(actual.get(0).id).isEqualTo(saved.id);
-        assertThat(actual.get(0).relatedEntities)
+        assertThat(actual.get(0).intermediateEntities)
                 .extracting(e -> e.content)
                 .containsExactly(contentString);
     }
 
-    interface DummyEntityRepository extends CrudRepository<DummyEntity, Long> {
-        List<DummyEntity> findByRelatedEntitiesContent(String content);
+    @Test
+    void getEntityByDoubleNestedProperty() {
+        // given
+        String contentString = "content";
+        String intermediateContent = "intermediateContent";
+        String relatedContent = "relatedContent";
+
+        // Create RelatedEntity with content
+        RelatedEntity related = new RelatedEntity(relatedContent);
+
+        // Create IntermediateEntity with the nested RelatedEntity
+        IntermediateEntity intermediate = new IntermediateEntity(intermediateContent, related);
+
+        // Create DummyEntity with the nested IntermediateEntity
+        DummyEntity dummy = new DummyEntity();
+        dummy.intermediateEntities = new HashSet<>();
+        dummy.intermediateEntities.add(intermediate);
+
+        // Save DummyEntity
+        DummyEntity saved = repository.save(dummy);
+
+        // when
+        List<DummyEntity> actual = repository.findByIntermediateEntitiesRelatedEntitiesContent(relatedContent);
+
+        // then
+        assertThat(actual).hasSize(1);
+        assertThat(actual.get(0).id).isEqualTo(saved.id);
+        assertThat(actual.get(0).intermediateEntities)
+                .extracting(e -> e.relatedEntities)  // Extract relatedEntities
+                .flatExtracting(relatedEntities -> relatedEntities)  // Flatten the Set
+                .extracting(e -> e.content)  // Extract content of RelatedEntity
+                .containsExactly(relatedContent);  // Check if the content matches
     }
 
-    interface RelatedEntityRepository extends CrudRepository<RelatedEntity, Long> {
+
+    interface DummyEntityRepository extends CrudRepository<DummyEntity, Long> {
+        List<DummyEntity> findByIntermediateEntitiesContent(String content);
+
+        List<DummyEntity> findByIntermediateEntitiesRelatedEntitiesContent(String content);
     }
 
     @Configuration
@@ -71,26 +102,42 @@ public class JdbcRepositoryNestedPropertyIntegrationTests {
         DummyEntityRepository dummyEntityRepository(JdbcRepositoryFactory factory) {
             return factory.getRepository(DummyEntityRepository.class);
         }
-
-        @Bean
-        RelatedEntityRepository relatedEntityRepository(JdbcRepositoryFactory factory) {
-            return factory.getRepository(RelatedEntityRepository.class);
-        }
     }
 
     static class DummyEntity {
         @Id
         Long id;
 
-        // Указываем имя колонки, которая соответствует внешнему ключу в таблице related_entity.
         @MappedCollection(idColumn = "dummy_entity_id")
-        Set<RelatedEntity> relatedEntities;
+        Set<IntermediateEntity> intermediateEntities;
 
         public DummyEntity() {
-        }  // Конструктор без аргументов обязателен
+        }
 
-        public DummyEntity(RelatedEntity relatedEntity) {
+        public DummyEntity(IntermediateEntity intermediateEntities) {
+            this.intermediateEntities = Set.of(intermediateEntities);
+        }
+    }
+
+    static class IntermediateEntity {
+        @Id
+        Long id;
+        String content;
+
+        @MappedCollection(idColumn = "intermediate_entity_id")
+        Set<RelatedEntity> relatedEntities;
+
+        public IntermediateEntity(String content, RelatedEntity relatedEntity) {
+            this.content = content;
             this.relatedEntities = Set.of(relatedEntity);
+        }
+
+        public IntermediateEntity(String content) {
+            this.content = content;
+            this.relatedEntities = Set.of();
+        }
+
+        public IntermediateEntity() {
         }
     }
 
@@ -100,7 +147,7 @@ public class JdbcRepositoryNestedPropertyIntegrationTests {
         String content;
 
         public RelatedEntity() {
-        } // Конструктор без аргументов для Spring Data JDBC
+        }
 
         public RelatedEntity(String content) {
             this.content = content;
