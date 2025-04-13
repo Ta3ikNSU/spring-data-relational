@@ -55,8 +55,8 @@ class JdbcCountQueryCreator extends JdbcQueryCreator {
 	}
 
 	@Override
-	SelectBuilder.SelectWhere applyLimitAndOffset(SelectBuilder.SelectLimitOffset limitOffsetBuilder) {
-		return (SelectBuilder.SelectWhere) limitOffsetBuilder;
+	SelectBuilder.SelectJoin applyLimitAndOffset(SelectBuilder.SelectLimitOffset limitOffsetBuilder) {
+		return (SelectBuilder.SelectJoin) limitOffsetBuilder;
 	}
 
 	@Override

@@ -11,7 +11,7 @@ CREATE TABLE dummy_entity
 
 CREATE TABLE related_entity
 (
-    id           BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1 ) PRIMARY KEYá
+    id           BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1 ) PRIMARY KEY,
     content      VARCHAR(255),
     dummy_entity BIGINT
 );

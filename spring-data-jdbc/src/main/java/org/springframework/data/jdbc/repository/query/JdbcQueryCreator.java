@@ -19,7 +19,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jdbc.core.convert.JdbcConverter;
@@ -28,6 +27,7 @@ import org.springframework.data.mapping.PersistentPropertyPath;
 import org.springframework.data.relational.core.dialect.Dialect;
 import org.springframework.data.relational.core.dialect.RenderContextFactory;
 import org.springframework.data.relational.core.mapping.AggregatePath;
+import org.springframework.data.relational.core.mapping.MappedCollection;
 import org.springframework.data.relational.core.mapping.RelationalMappingContext;
 import org.springframework.data.relational.core.mapping.RelationalPersistentEntity;
 import org.springframework.data.relational.core.mapping.RelationalPersistentProperty;
@@ -117,39 +117,7 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 	 * @param parameters parameters for the predicate.
 	 */
 	static void validate(PartTree tree, Parameters<?, ?> parameters, RelationalMappingContext context) {
-
 		RelationalQueryCreator.validate(tree, parameters);
-
-		for (PartTree.OrPart parts : tree) {
-			for (Part part : parts) {
-
-				PersistentPropertyPath<? extends RelationalPersistentProperty> propertyPath = context
-						.getPersistentPropertyPath(part.getProperty());
-				AggregatePath path = context.getAggregatePath(propertyPath);
-
-				path.forEach(JdbcQueryCreator::validateProperty);
-			}
-		}
-	}
-
-	private static void validateProperty(AggregatePath path) {
-
-		if (path.isRoot()) {
-			return;
-		}
-
-		if (!path.getParentPath().isEmbedded() && path.getLength() > 2) {
-			throw new IllegalArgumentException(String.format("Cannot query by nested property: %s", path.toDotPath()));
-		}
-
-		if (path.isMultiValued() || path.isMap()) {
-			throw new IllegalArgumentException(
-					String.format("Cannot query by multi-valued property: %s", path.getRequiredLeafProperty().getName()));
-		}
-
-		if (!path.isEmbedded() && path.isEntity()) {
-			throw new IllegalArgumentException(String.format("Cannot query by nested entity: %s", path.toDotPath()));
-		}
 	}
 
 	/**
@@ -167,10 +135,10 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 		MapSqlParameterSource parameterSource = new MapSqlParameterSource();
 
 		SelectBuilder.SelectLimitOffset limitOffsetBuilder = createSelectClause(entity, table);
-		SelectBuilder.SelectWhere whereBuilder = applyLimitAndOffset(limitOffsetBuilder);
-		SelectBuilder.SelectOrdered selectOrderBuilder = applyCriteria(criteria, entity, table, parameterSource,
-				whereBuilder);
-		selectOrderBuilder = applyOrderBy(sort, entity, table, selectOrderBuilder);
+        SelectBuilder.SelectJoin joinBuilder = applyLimitAndOffset(limitOffsetBuilder);
+        SelectBuilder.SelectOrdered selectOrderBuilder = applyCriteria(criteria, entity, table, parameterSource, joinBuilder);
+
+        selectOrderBuilder = applyOrderBy(sort, entity, table, selectOrderBuilder);
 
 		SelectBuilder.BuildSelect completedBuildSelect = selectOrderBuilder;
 		if (this.lockMode.isPresent()) {
@@ -180,9 +148,78 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 		Select select = completedBuildSelect.build();
 
 		String sql = SqlRenderer.create(renderContextFactory.createRenderContext()).render(select);
-
 		return new ParametrizedQuery(sql, parameterSource);
 	}
+
+    SelectBuilder.SelectOrdered applyCriteria(
+            @Nullable Criteria criteria,
+            RelationalPersistentEntity<?> rootEntity,
+            Table rootTable,
+            MapSqlParameterSource parameterSource,
+            SelectBuilder.SelectJoin joinBuilder) {
+
+        if (criteria == null) {
+            return (SelectBuilder.SelectWhere) joinBuilder;
+        }
+
+        // Extract the full property path (e.g., "relatedEntities.content")
+        String propertyPath = criteria.getColumn().getReference();
+
+        // Extract the top-level nested property name (e.g., "relatedEntities")
+        String nestedPropertyName = extractNestedEntityName(propertyPath);
+
+        // Get the metadata for the nested property
+        RelationalPersistentProperty nestedProperty = rootEntity.getPersistentProperty(nestedPropertyName);
+        if (nestedProperty == null) {
+            throw new IllegalArgumentException("No property '" + nestedPropertyName + "' found in " + rootEntity.getName());
+        }
+
+        // Get the metadata for the nested entity
+        Class<?> nestedEntityType = nestedProperty.getActualType();
+        RelationalPersistentEntity<?> nestedEntity = context.getRequiredPersistentEntity(nestedEntityType);
+
+        // Determine the foreign key column name from the @MappedCollection annotation
+        String fkColumn = Optional.ofNullable(nestedProperty.findAnnotation(MappedCollection.class))
+                .map(MappedCollection::idColumn)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Property '" + nestedPropertyName + "' is not annotated with @MappedCollection"));
+
+        Table relatedTable = Table.create(nestedEntity.getTableName());
+
+        // Build the JOIN clause
+        SelectBuilder.SelectWhere joined = joinBuilder
+                .join(relatedTable)
+                .on(relatedTable.column(fkColumn))
+                .equals(rootTable.column(rootEntity.getIdColumn()));
+
+        // Strip the nested prefix from the criteria column (e.g., "relatedEntities.content" -> "content")
+        Criteria strippedCriteria = stripPathPrefix(criteria, nestedPropertyName);
+
+        // Build the WHERE clause based on the stripped criteria
+        return joined.where(queryMapper.getMappedObject(parameterSource, strippedCriteria, relatedTable, nestedEntity));
+    }
+
+    private String extractNestedEntityName(String propertyPath) {
+        int dotIndex = propertyPath.indexOf('.');
+        if (dotIndex == -1) {
+            throw new IllegalArgumentException("Expected nested property path but got: " + propertyPath);
+        }
+        return propertyPath.substring(0, dotIndex);
+    }
+
+    private Criteria stripPathPrefix(Criteria criteria, String prefix) {
+        String columnPath = criteria.getColumn().getReference();
+        String expectedPrefix = prefix + ".";
+
+        if (!columnPath.startsWith(expectedPrefix)) {
+            return criteria;
+        }
+
+        String strippedPath = columnPath.substring(expectedPrefix.length());
+
+        // Only handling 'is' for now — extend this if needed
+        return Criteria.where(strippedPath).is(criteria.getValue());
+    }
 
 	SelectBuilder.SelectOrdered applyOrderBy(Sort sort, RelationalPersistentEntity<?> entity, Table table,
 			SelectBuilder.SelectOrdered selectOrdered) {
@@ -192,15 +229,7 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 				: selectOrdered;
 	}
 
-	SelectBuilder.SelectOrdered applyCriteria(@Nullable Criteria criteria, RelationalPersistentEntity<?> entity,
-			Table table, MapSqlParameterSource parameterSource, SelectBuilder.SelectWhere whereBuilder) {
-
-		return criteria != null //
-				? whereBuilder.where(queryMapper.getMappedObject(parameterSource, criteria, table, entity)) //
-				: whereBuilder;
-	}
-
-	SelectBuilder.SelectWhere applyLimitAndOffset(SelectBuilder.SelectLimitOffset limitOffsetBuilder) {
+    SelectBuilder.SelectJoin applyLimitAndOffset(SelectBuilder.SelectLimitOffset limitOffsetBuilder) {
 
 		if (tree.isExistsProjection()) {
 			limitOffsetBuilder = limitOffsetBuilder.limit(1);
@@ -214,7 +243,7 @@ class JdbcQueryCreator extends RelationalQueryCreator<ParametrizedQuery> {
 					.offset(pageable.getOffset());
 		}
 
-		return (SelectBuilder.SelectWhere) limitOffsetBuilder;
+        return (SelectBuilder.SelectJoin) limitOffsetBuilder;
 	}
 
 	SelectBuilder.SelectLimitOffset createSelectClause(RelationalPersistentEntity<?> entity, Table table) {
